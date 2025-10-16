@@ -1,53 +1,89 @@
 # app/main.py
+from __future__ import annotations
+
+import asyncio
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.schemas import ChatRequest, ChatResponse, Message
-from app.chatbot import run_agent  # your real Gemini chatbot
 from app.settings import settings
+from app.schemas import ChatRequest, ChatResponse, Message
+from app.chatbot import run_sync  # sync function that calls abagentsdk Agent.run(...)
 
-# Initialize FastAPI
-app = FastAPI(title="ABZ Agent API", version="0.1.0")
+# -----------------------------------------------------------------------------
+# FastAPI App
+# -----------------------------------------------------------------------------
+app = FastAPI(
+    title=settings.APP_NAME if hasattr(settings, "APP_NAME") else "ABZ Agent API",
+    version="0.1.0",
+    docs_url="/docs",
+    redoc_url=None,
+    openapi_url="/openapi.json",
+)
 
-# CORS settings (for your Next.js frontend)
+# -----------------------------------------------------------------------------
+# CORS — allow your Vercel app + localhost. Regex covers any *.vercel.app domain.
+# -----------------------------------------------------------------------------
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:3000",
-        "http://127.0.0.1:3000",
-        settings.CORS_ALLOW_ORIGINS[0] if hasattr(settings, "CORS_ALLOW_ORIGINS") else "*",
-    ],
+    allow_origins=[],  # keep empty when using regex
+    allow_origin_regex=r"^https:\/\/.*\.vercel\.app$",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# Health check route
+# You can optionally add your exact prod/custom domain as well:
+# app.add_middleware(
+#     CORSMiddleware,
+#     allow_origins=["https://your-custom-domain.com", "http://localhost:3000"],
+#     allow_credentials=True,
+#     allow_methods=["*"],
+#     allow_headers=["*"],
+# )
+
+# -----------------------------------------------------------------------------
+# Routes
+# -----------------------------------------------------------------------------
 @app.get("/health")
 def health():
-    return {"ok": True, "name": "ABZ Agent API", "status": "running"}
-
-# Main chat route (calls Gemini via abagentsdk)
-@app.post("/v1/chat", response_model=ChatResponse)
-async def chat(req: ChatRequest):
     """
-    ABZ Chatbot endpoint.
-    Calls your Gemini-powered agent using abagentsdk.
+    Lightweight liveness probe for uptime checks and cold-start prewarming.
+    """
+    return {"ok": True, "name": app.title, "status": "running"}
+
+@app.post("/v1/chat", response_model=ChatResponse)
+async def chat(req: ChatRequest) -> ChatResponse:
+    """
+    Accepts a list of messages [{role, content}], runs the ABZ agent,
+    and returns the assistant's message. We offload the sync agent call
+    to a worker thread so the event loop stays responsive.
     """
     try:
+        # pydantic models -> plain dicts
         messages = [m.model_dump() for m in req.messages]
-        answer = await run_agent(messages)
+
+        # run_sync(...) is synchronous; execute in a thread
+        answer: str = await asyncio.to_thread(run_sync, messages)
         return ChatResponse(message=Message(role="assistant", content=answer))
+
+    except HTTPException:
+        # pass through explicit HTTPExceptions
+        raise
     except Exception as e:
+        # keep error observable but not noisy
         raise HTTPException(status_code=500, detail=f"Agent Error: {e}")
 
-# Optional redirect for convenience
 @app.get("/", include_in_schema=False)
 def index():
-    return {
-        "ok": True,
-        "name": "ABZ Agent API",
-        "docs": "/docs",
-        "chat": "POST /v1/chat",
-        "message": "Backend connected — send requests via Next.js frontend or /v1/chat."
-    }
+    """
+    Friendly index for quick smoke testing.
+    """
+    return {"ok": True, "routes": ["/health", "POST /v1/chat", "/docs"]}
+
+# -----------------------------------------------------------------------------
+# Optional local dev entrypoint
+# Run: uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
+# -----------------------------------------------------------------------------
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run("app.main:app", host="0.0.0.0", port=8000, reload=True)
