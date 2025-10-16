@@ -1,0 +1,11 @@
+# render.yaml
+services:
+  - type: web
+    name: abz-agent-api
+    env: python
+    buildCommand: pip install -r app/requirements.txt
+    startCommand: uvicorn app.main:app --host 0.0.0.0 --port 8000
+    plan: free
+    envVars:
+      - key: GEMINI_API_KEY
+        sync: false   # set the value in the Render dashboard
